@@ -59,10 +59,12 @@ local function execute_script(db, type, s)
     if not ok and ret:find("NOSCRIPT") then
         ok, ret = pcall(db["eval"], db, SCRIPT[type], 1, s.lockname, s.uuid, s.timeout)
     end
+
     if not ok then
         skynet.error("redis execute_script err.", ret, s.lockname, s.uuid, s.timeout)
         return false
     end
+
     if ret == 1 then
         return true
     end
@@ -109,7 +111,9 @@ local function make_session(lockname, uuid, timeout)
 end
 
 local function unlock(s)
-    s.endtime = 0
+    if not s then
+        return
+    end
     for _, db in pairs(dbs) do
         execute_script(db, "UNLOCK", s)
     end
@@ -147,15 +151,20 @@ local function attempt(s, is_extend)
         end)
         return true
     else
-        unlock(s)
         -- retry
+        unlock(s)
         if conf.retry_count == -1 or s.attempts <= conf.retry_count then
             local t = conf.retry_delay + math_floor((math_random()*2-1) * conf.retry_jitter)
-            skynet.sleep(math_ceil(t/10))
+            t = math_ceil(t/10)
+            skynet.sleep(t)
+            if s.endtime == 0 then
+                return false, "be unlocked"
+            end
             calc_time(s)
             return attempt(s)
         end
         -- failed
+        s.endtime = 0
         sessions[s.uuid] = nil
         return false, "timeout"
     end
@@ -168,23 +177,31 @@ function CMD.lock(lockname, uuid, timeout)
     local timeout = timeout or conf.timeout
     local s = sessions[uuid]
     if s then
-        return false, "session exist"
+        return skynet.retpack(false, "session exist")
     end
     s = make_session(lockname, uuid, timeout)
     sessions[uuid] = s
 
-    return attempt(s)
+    return skynet.retpack(attempt(s))
 end
 
 function CMD.unlock(lockname, uuid)
     local s = sessions[uuid]
     if not s then
-        return false, "session not exist."
+        skynet.error("redlockd unlock session not exist.", uuid)
+        return
     end
+
+    unlock(s)
+    s.endtime = 0
     sessions[uuid] = nil
-    return unlock(s)
 end
 
+function CMD.unlock_batch(uuid2lockname)
+    for uuid, lockname in pairs(uuid2lockname) do
+        CMD.unlock(lockname, uuid)
+    end
+end
 
 skynet.init(function()
     conf = require "redlock_conf"
@@ -196,10 +213,10 @@ end)
 
 
 skynet.start(function()
-    skynet.dispatch("lua", function(_, _, cmd, ...)
+    skynet.dispatch("lua", function(_, addr, cmd, ...)
         local f = CMD[cmd]
         assert(f, cmd)
-        skynet.retpack(f(...))
+        f(...)
     end)
 end)
 
