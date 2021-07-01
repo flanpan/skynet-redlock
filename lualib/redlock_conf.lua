@@ -32,7 +32,10 @@ local conf = {
     retry_jitter = 100,
 
     -- 请求redis超时时间(毫秒)
-    request_timeout = 500
+    request_timeout = 500,
+
+    -- 最大会话数量
+    max_session = 20000,
 }
 
 return conf

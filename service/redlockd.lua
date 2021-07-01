@@ -53,15 +53,17 @@ local SCRIPT_HASH = {
 local conf
 local dbs = {}
 local sessions = {}
+local session_cnt = 0
 
 local function execute_script(db, type, s)
-    local ok, ret = pcall(db["evalsha"], db, SCRIPT_HASH[type], 1, s.lockname, s.uuid, s.timeout)
+    local timeout = conf.timeout
+    local ok, ret = pcall(db["evalsha"], db, SCRIPT_HASH[type], 1, s.lockname, s.uuid, timeout)
     if not ok and ret:find("NOSCRIPT") then
-        ok, ret = pcall(db["eval"], db, SCRIPT[type], 1, s.lockname, s.uuid, s.timeout)
+        ok, ret = pcall(db["eval"], db, SCRIPT[type], 1, s.lockname, s.uuid, timeout)
     end
 
     if not ok then
-        skynet.error("redis execute_script err.", ret, s.lockname, s.uuid, s.timeout)
+        skynet.error("redis execute_script err.", ret, s.lockname, s.uuid, timeout)
         return false
     end
 
@@ -91,24 +93,37 @@ local function execute_script_timeout(db, type, s)
 end
 
 local function calc_time(s)
+    local timeout = conf.timeout
     local now = skynet.now()*10
-    local drift = math_floor(conf.drift_factor * s.timeout) + 2
+    local drift = math_floor(conf.drift_factor * timeout) + 2
     s.starttime = now
-    s.endtime = now + s.timeout - drift
+    s.endtime = now + timeout - drift
 end
 
-local function make_session(lockname, uuid, timeout)
+local function make_session(lockname, uuid, hold)
+    assert(not sessions[uuid])
     local s = {
         lockname = lockname,
         uuid = uuid,
-        timeout = timeout,
         attempts = 0,
         starttime = 0,
         endtime = 0,
+        hold = hold
     }
     calc_time(s)
+    sessions[uuid] = s
+    session_cnt = session_cnt + 1
     return s
 end
+
+local function free_session(s)
+    s.endtime = 0
+    if sessions[s.uuid] then
+        sessions[s.uuid] = nil
+        session_cnt = session_cnt - 1
+    end
+end
+
 
 local function unlock(s)
     if not s then
@@ -136,7 +151,7 @@ local function attempt(s, is_extend)
     
     local now = skynet.now()*10
     if votes >= QUORUM and s.endtime > now then
-        local ti = s.timeout/3 - (now-s.starttime)
+        local ti = conf.timeout/3 - (now-s.starttime)
         ti = math_floor(ti/10)
         if ti < 0 then
             ti = 0
@@ -153,7 +168,7 @@ local function attempt(s, is_extend)
     else
         -- retry
         unlock(s)
-        if conf.retry_count == -1 or s.attempts <= conf.retry_count then
+        if s.hold or s.attempts <= conf.retry_count then
             local t = conf.retry_delay + math_floor((math_random()*2-1) * conf.retry_jitter)
             t = math_ceil(t/10)
             skynet.sleep(t)
@@ -164,8 +179,7 @@ local function attempt(s, is_extend)
             return attempt(s)
         end
         -- failed
-        s.endtime = 0
-        sessions[s.uuid] = nil
+        free_session(s)
         return false, "timeout"
     end
 end
@@ -173,15 +187,17 @@ end
 
 local CMD = {}
 
-function CMD.lock(lockname, uuid, timeout)
-    local timeout = timeout or conf.timeout
+function CMD.lock(lockname, uuid, hold)
     local s = sessions[uuid]
     if s then
         return skynet.retpack(false, "session exist")
     end
-    s = make_session(lockname, uuid, timeout)
-    sessions[uuid] = s
 
+    if session_cnt >= conf.max_session then
+        return skynet.retpack(false, "session limit")
+    end
+
+    s = make_session(lockname, uuid, hold)
     return skynet.retpack(attempt(s))
 end
 
@@ -191,10 +207,8 @@ function CMD.unlock(lockname, uuid)
         skynet.error("redlockd unlock session not exist.", uuid)
         return
     end
-
     unlock(s)
-    s.endtime = 0
-    sessions[uuid] = nil
+    free_session(s)
 end
 
 function CMD.unlock_batch(uuid2lockname)

@@ -20,7 +20,7 @@ local is_slave = ...
 skynet.start(function()
     redlock.lock("lock:test1", test_lock1)
     redlock.lock("lock:test1", test_lock1, test_cb)
-    redlock.lock("lock:test1", test_lock2, test_cb, 3000, "hello")
+    redlock.lock("lock:test1", test_lock2, test_cb, "hello")
     if not is_slave then
         for i=1, 10 do
             skynet.newservice("test_redlock", "i am slave")

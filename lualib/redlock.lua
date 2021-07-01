@@ -15,24 +15,28 @@ local redlock = setmetatable({}, {
 
 local function default_cb() end
 
-local function _lock(lockname, func, cb, timeout, ...)
+local function _lock(lockname, func, cb, hold, ...)
     cb = cb or default_cb
     local uuid = make_uuid()
     uuid2lockname[uuid] = lockname
 
-    local ok, data = skynet.call(addr, "lua", "lock", lockname, uuid, timeout)
+    local ok, data = skynet.call(addr, "lua", "lock", lockname, uuid, hold)
     if not ok then
         uuid2lockname[uuid] = nil
         return cb(ok, data)
     end
-    
+
     cb(pcall(func, ...))
     skynet.send(addr, "lua", "unlock", lockname, uuid)
     uuid2lockname[uuid] = nil
 end
 
-function redlock.lock(lockname, func, cb, timeout, ...)
-    skynet.fork(_lock, lockname, func, cb, timeout, ...)
+function redlock.lock(lockname, func, cb, ...)
+    skynet.fork(_lock, lockname, func, cb, false, ...)
+end
+
+function redlock.holdlock(lockname, func, cb, ...)
+    skynet.fork(_lock, lockname, func, cb, true, ...)
 end
 
 skynet.init(function()
