@@ -17,7 +17,7 @@ local conf = {
     end,
 
     -- 默认锁过期时间
-    timeout = 3000,
+    timeout = 10000,
 
     -- 用计算服务器漂移时间 (http://redis.io/topics/distlock)
     drift_factor = 0.01,

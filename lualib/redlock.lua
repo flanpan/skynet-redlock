@@ -27,7 +27,10 @@ local function _lock(lockname, func, cb, hold, ...)
     end
 
     cb(pcall(func, ...))
-    skynet.send(addr, "lua", "unlock", lockname, uuid)
+    local ok, data = skynet.call(addr, "lua", "unlock", lockname, uuid)
+    if not ok then
+        skynet.error("redlock err.", data, uuid)
+    end
     uuid2lockname[uuid] = nil
 end
 

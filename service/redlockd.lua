@@ -20,27 +20,29 @@ local QUORUM
 local SCRIPT = {
     LOCK = [[
         local key = KEYS[1]
+        local uuid = ARGV[1]
         if redis.call("exists", key) == 1 then
-            return 0
+            return
         end
-        redis.call("set", key, ARGV[1], "PX", ARGV[2])
-        return 1
+        redis.call("set", key, uuid, "PX", ARGV[2])
+        return uuid
     ]],
     UNLOCK = [[
         local key = KEYS[1]
-        if redis.call("get", key) == ARGV[1] then
+        local uuid = redis.call("get", key)
+        if uuid == ARGV[1] then
             redis.pcall("del", key)
-            return 1
         end
-        return 0
+        return uuid
     ]],
     EXTEND = [[
         local key = KEYS[1]
-        if redis.call("get", key) ~= ARGV[1] then
-            return 0
+        local uuid = ARGV[1]
+        if redis.call("get", key) ~= uuid then
+            return
         end
-        redis.call("set", key, ARGV[1], "PX", ARGV[2])
-        return 1
+        redis.call("set", key, uuid, "PX", ARGV[2])
+        return uuid
     ]]
 }
 
@@ -54,20 +56,23 @@ local conf
 local dbs = {}
 local sessions = {}
 local session_cnt = 0
+local NORET = {}
 
 local function execute_script(db, type, s)
     local timeout = conf.timeout
-    local ok, ret = pcall(db["evalsha"], db, SCRIPT_HASH[type], 1, s.lockname, s.uuid, timeout)
+    local lockname = s.lockname
+    local uuid = s.uuid
+    local ok, ret = pcall(db["evalsha"], db, SCRIPT_HASH[type], 1, lockname, uuid, timeout)
     if not ok and ret:find("NOSCRIPT") then
-        ok, ret = pcall(db["eval"], db, SCRIPT[type], 1, s.lockname, s.uuid, timeout)
+        ok, ret = pcall(db["eval"], db, SCRIPT[type], 1, lockname, uuid, timeout)
     end
 
     if not ok then
-        skynet.error("redis execute_script err.", ret, s.lockname, s.uuid, timeout)
+        skynet.error("redis execute_script err.", ret, lockname, uuid, timeout)
         return false
     end
 
-    if ret == 1 then
+    if ret == uuid then
         return true
     end
     return false
@@ -127,11 +132,20 @@ end
 
 local function unlock(s)
     if not s then
-        return
+        return false, "session not exist"
     end
+
+    local votes = 0
     for _, db in pairs(dbs) do
-        execute_script(db, "UNLOCK", s)
+        if execute_script(db, "UNLOCK", s) then
+            votes = votes + 1
+        end
     end
+    if votes < QUORUM then
+        skynet.error("redlockd lock expired", s.uuid)
+        return false, "expired"
+    end
+    return true
 end
 
 local function attempt(s, is_extend)
@@ -190,31 +204,32 @@ local CMD = {}
 function CMD.lock(lockname, uuid, hold)
     local s = sessions[uuid]
     if s then
-        return skynet.retpack(false, "session exist")
+        return false, "session exist"
     end
 
     if session_cnt >= conf.max_session then
-        return skynet.retpack(false, "session limit")
+        return false, "session limit"
     end
 
     s = make_session(lockname, uuid, hold)
-    return skynet.retpack(attempt(s))
+    return attempt(s)
 end
 
 function CMD.unlock(lockname, uuid)
     local s = sessions[uuid]
     if not s then
-        skynet.error("redlockd unlock session not exist.", uuid)
-        return
+        return false, "session not exist"
     end
-    unlock(s)
+    local ok, data = unlock(s)
     free_session(s)
+    return ok, data
 end
 
 function CMD.unlock_batch(uuid2lockname)
     for uuid, lockname in pairs(uuid2lockname) do
         CMD.unlock(lockname, uuid)
     end
+    return NORET
 end
 
 skynet.init(function()
@@ -230,7 +245,10 @@ skynet.start(function()
     skynet.dispatch("lua", function(_, addr, cmd, ...)
         local f = CMD[cmd]
         assert(f, cmd)
-        f(...)
+        local ok, data = f(...)
+        if ok ~= NORET then
+            skynet.retpack(ok, data)
+        end
     end)
 end)
 
