@@ -142,7 +142,6 @@ local function unlock(s)
         end
     end
     if votes < QUORUM then
-        skynet.error("redlockd lock expired", s.uuid)
         return false, "expired"
     end
     return true
